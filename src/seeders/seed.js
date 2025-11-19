@@ -8,7 +8,7 @@ async function seed() {
 
     // Generate 100 sample data entries for FoodReport
     const sampleData = [];
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 100000; i++) {
       sampleData.push({
         lab_id: Math.floor(Math.random() * 10) + 1, // Random lab_id between 1 and 10
         protein: parseFloat((Math.random() * 20 + 5).toFixed(1)), // Random protein between 5.0 and 25.0
