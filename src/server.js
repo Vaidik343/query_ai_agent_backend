@@ -5,7 +5,7 @@ const app = express();
 
 // Load Sequelize models (this loads sequelize instance automatically)
 const { sequelize } = require("./models");
-
+const queryRoutes = require("./routes/queryRoutes");
 // Middlewares
 app.use(express.json());
 app.use(cors());
@@ -15,6 +15,8 @@ app.get("/", (req, res) => {
   res.send("home page");
 });
 
+
+app.use("/api", queryRoutes);
 // START SERVER
 const PORT = process.env.PORT || 7000;
 
