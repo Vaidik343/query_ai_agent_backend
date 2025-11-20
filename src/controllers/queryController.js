@@ -1,17 +1,17 @@
 const { FoodReport } = require('../models/index');
-// const OpenAI = require("openai")
 const { sequelize } = require("../models");
-// const { safeOpenAIRequest } = require('../utils/openaiHelper');
-const { queryOllama } = require("../utils/ollamaHelper");
+const { askGroq } = require("../utils/groqHelper"); // your groq helper
 
-
-// const client = new OpenAI({
-//     apiKey: process.env.OPENAI_API_KEY
-// });
-
+// ---------------------------------------------
+//  Main Controller
+// ---------------------------------------------
 const runQuery = async (req, res) => {
+  console.log("🔥 /run-query endpoint hit:", req.body);
+
   try {
     const { labId, prompt } = req.body;
+
+    console.log("🚀 runQuery →", { labId, prompt });
 
     if (!labId || !prompt) {
       return res.status(400).json({
@@ -19,91 +19,130 @@ const runQuery = async (req, res) => {
       });
     }
 
-    // --- 1️⃣ SQL Prompt ---
+    // ---------------------------------------------
+    // 1️⃣ SQL GENERATION PROMPT
+    // ---------------------------------------------
     const sqlPrompt = `
-You convert natural language to EXACT SQL for PostgreSQL.
+Convert natural language to a **PostgreSQL SELECT SQL query**.
 
-DATABASE:
 Table: "FoodReports"
-Columns: lab_id INT, protein FLOAT, fat FLOAT, weight FLOAT, expiry INT
+Columns: lab_id, protein, fat, weight, expiry
 
-STRICT RULES:
-- ALWAYS include: lab_id = ${labId}
-- Output MUST be ONLY SQL. No Markdown. No explanation.
-- Do NOT use backticks.
-- Do NOT guess missing columns.
-- Do NOT rename columns.
-- Always select known existing fields.
-
-User request: ${prompt}
-
-Return only the SQL query:
+Rules:
+- ALWAYS include: WHERE lab_id = ${labId}
+- Use ONLY table name: "FoodReports"
+- Return PURE SQL
+- NO markdown
+- NO backticks
+- NO explanation
+- NO labels like "sql" or "SQL:"
+User question: ${prompt}
 `;
 
-    const sqlRaw = await queryOllama(sqlPrompt, 150);
+    console.log("⚡ Sending SQL generation prompt to Groq...");
+    let sql = await askGroq(sqlPrompt);
 
-    let sql = sqlRaw
-      .replace(/```sql/gi, "")
-      .replace(/```/g, "")
-      .replace(/\bFoodReports\b/g, `"FoodReports"`)
-      .trim();
+    // ---------------------------------------------
+    // 2️⃣ CLEAN SQL
+    // ---------------------------------------------
+    sql = cleanSQL(sql);
+    console.log("🟣 Cleaned SQL:", sql);
 
-    console.log("SQL GENERATED:", sql);
+    let result;
 
-    // --- 2️⃣ SQL Safety ---
-    if (/drop|delete|update|insert|alter|truncate/i.test(sql)) {
-      return res.status(400).json({
-        error: "Unsafe SQL detected",
-        sql,
+    try {
+      // ---------------------------------------------
+      // 3️⃣ PRIMARY SQL EXECUTION
+      // ---------------------------------------------
+      result = await sequelize.query(sql, {
+        type: sequelize.QueryTypes.SELECT,
+      });
+
+    } catch (e) {
+      // ---------------------------------------------
+      // 4️⃣ FALLBACK SQL PROMPT (simple & guaranteed safe)
+      // ---------------------------------------------
+      console.log("❌ SQL failed. Retrying with simpler fallback...");
+
+      const fallbackPrompt = `
+User question: ${prompt}
+
+Generate a valid PostgreSQL SELECT query.
+
+Rules:
+- Table: "FoodReports"
+- Columns: lab_id, protein, fat, weight, expiry
+- MUST include: WHERE lab_id = ${labId}
+- Return ONLY SQL
+- NO markdown, NO backticks, NO explanations, NO 'sql:' prefix
+`;
+
+      sql = await askGroq(fallbackPrompt);
+      sql = cleanSQL(sql);
+
+      console.log("🟣 Fallback SQL (clean):", sql);
+
+      // Execute fallback SQL
+      result = await sequelize.query(sql, {
+        type: sequelize.QueryTypes.SELECT,
       });
     }
 
-    // --- 3️⃣ Execute SQL ---
-    const result = await sequelize.query(sql, {
-      type: sequelize.QueryTypes.SELECT,
-    });
-
-    // --- 4️⃣ Explanation Prompt ---
+    // ---------------------------------------------
+    // 5️⃣ EXPLANATION USING GROQ
+    // ---------------------------------------------
     const explainPrompt = `
-Explain the result very simply.
-
-User asked: ${prompt}
-Rows returned: ${result.length}
-
+Explain this SQL result in simple English.
+User question: ${prompt}
+SQL: ${sql}
 Data: ${JSON.stringify(result)}
-
-Return short explanation only.
+Keep it short.
 `;
-    console.log("🚀 ~ runQuery ~ explainPrompt:", explainPrompt)
 
-    const explanation = await queryOllama(explainPrompt, 100);
+    const explanation = await askGroq(explainPrompt);
 
-    // --- 5️⃣ Response ---
+    // ---------------------------------------------
+    // 6️⃣ SEND RESPONSE
+    // ---------------------------------------------
     res.json({
       sql,
-      answerText: result.length === 0 ? "No matching data found." : explanation,
+      answerText: result.length === 0 ? "No matching data." : explanation.trim(),
       answerTable: result.length > 0 ? result : null,
     });
 
   } catch (error) {
-    console.error("runQuery error:", error);
-    res.status(500).json({ error: "Server error" });
+    console.log("🔥 runQuery error:", error);
+    res.status(500).json({
+      error: "Server error",
+      details: error.message,
+    });
   }
 };
-console.log("🚀 ~ runQuery ~ runQuery:", runQuery)
 
-
-
-
-const getAllData = async (req, res) => {
-    try {
-        const data = await FoodReport.findAll();
-        res.json({ data });
-    } catch (error) {
-        console.log("🚀 ~ getAllData ~ error:", error)
-        res.status(500).json({ error: "Failed to fetch data" });
-    }
+// ---------------------------------------------
+// Helper → Strong SQL Cleanup
+// ---------------------------------------------
+function cleanSQL(sql) {
+  return sql
+    .replace(/```sql/gi, "")
+    .replace(/```/g, "")
+    .replace(/^sql[\s:]/i, "")
+    .replace(/^SQL[\s:]/i, "")
+    .replace(/--.*/g, "")
+    .replace(/\bFoodReports\b/g, `"FoodReports"`)
+    .trim();
 }
+
+
+// ---------------------------------------------
+const getAllData = async (req, res) => {
+  try {
+    const data = await FoodReport.findAll();
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch data" });
+  }
+};
 
 const getDataByLab = async (req, res) => {
   try {
@@ -111,16 +150,12 @@ const getDataByLab = async (req, res) => {
 
     const data = await FoodReport.findAll({
       where: { lab_id: labId },
-     
     });
 
     res.json({ data });
-
   } catch (error) {
-    console.log("🚀 ~ getDataByLab ~ error:", error);
     res.status(500).json({ error: "Failed to fetch lab data" });
   }
 };
 
-
-module.exports = { runQuery, getAllData ,getDataByLab}
+module.exports = { runQuery, getAllData, getDataByLab };
