@@ -238,11 +238,26 @@ function buildSQL(labId, intentObj) {
 }
 
 // convenience: top-level function to parse+build
-function parseAndBuild(labId, text) {
+function parseAndBuild(labId, text, options = {}) {
   const parsed = parsePrompt(text);
   if (!parsed.success) return parsed;
+
   const built = buildSQL(labId, parsed);
+
+  // --- NEW: embed values for logging/cache if requested ---
+  if (options.embedValues && built.success && built.replacements) {
+  let sqlWithValues = built.sql;
+  for (const [key, val] of Object.entries(built.replacements)) {
+    const safeVal = typeof val === "string" ? `'${val}'` : val;
+    // replace exact placeholder with actual value
+    sqlWithValues = sqlWithValues.replace(new RegExp(`:${key}\\b`, "g"), safeVal);
+  }
+  built.sqlEmbedded = sqlWithValues; // for logging/cache
+}
+
+
   return built;
 }
+
 
 module.exports = { parsePrompt, buildSQL, parseAndBuild };
