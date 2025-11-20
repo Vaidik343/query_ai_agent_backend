@@ -1,137 +1,72 @@
 const { FoodReport } = require('../models/index');
 const { sequelize } = require("../models");
-const { askGroq } = require("../utils/groqHelper"); // your groq helper
-
+const { parseAndBuild } = require('../utils/queryParser');
 // ---------------------------------------------
 //  Main Controller
 // ---------------------------------------------
-const runQuery = async (req, res) => {
-  console.log("🔥 /run-query endpoint hit:", req.body);
+// src/controllers/queryController.js
 
+const runQuery = async (req, res) => {
   try {
     const { labId, prompt } = req.body;
+    if (!labId || !prompt) return res.status(400).json({ error: 'labId and prompt required' });
 
-    console.log("🚀 runQuery →", { labId, prompt });
+    console.log('🔥 parser run:', { labId, prompt });
 
-    if (!labId || !prompt) {
-      return res.status(400).json({
-        error: "labId and prompt are required",
-      });
+    const built = parseAndBuild(labId, prompt);
+    if (!built || !built.success) {
+      return res.status(400).json({ error: built.error || 'Could not parse prompt' });
     }
 
-    // ---------------------------------------------
-    // 1️⃣ SQL GENERATION PROMPT
-    // ---------------------------------------------
-    const sqlPrompt = `
-Convert natural language to a **PostgreSQL SELECT SQL query**.
+    console.log('🟣 SQL:', built.sql);
+    console.log('🔁 replacements:', built.replacements);
 
-Table: "FoodReports"
-Columns: lab_id, protein, fat, weight, expiry
+    // execute parameterized query
+    const result = await sequelize.query(built.sql, {
+      type: sequelize.QueryTypes.SELECT,
+      replacements: built.replacements
+    });
 
-Rules:
-- ALWAYS include: WHERE lab_id = ${labId}
-- Use ONLY table name: "FoodReports"
-- Return PURE SQL
-- NO markdown
-- NO backticks
-- NO explanation
-- NO labels like "sql" or "SQL:"
-User question: ${prompt}
-`;
-
-    console.log("⚡ Sending SQL generation prompt to Groq...");
-    let sql = await askGroq(sqlPrompt);
-
-    // ---------------------------------------------
-    // 2️⃣ CLEAN SQL
-    // ---------------------------------------------
-    sql = cleanSQL(sql);
-    console.log("🟣 Cleaned SQL:", sql);
-
-    let result;
-
-    try {
-      // ---------------------------------------------
-      // 3️⃣ PRIMARY SQL EXECUTION
-      // ---------------------------------------------
-      result = await sequelize.query(sql, {
-        type: sequelize.QueryTypes.SELECT,
-      });
-
-    } catch (e) {
-      // ---------------------------------------------
-      // 4️⃣ FALLBACK SQL PROMPT (simple & guaranteed safe)
-      // ---------------------------------------------
-      console.log("❌ SQL failed. Retrying with simpler fallback...");
-
-      const fallbackPrompt = `
-User question: ${prompt}
-
-Generate a valid PostgreSQL SELECT query.
-
-Rules:
-- Table: "FoodReports"
-- Columns: lab_id, protein, fat, weight, expiry
-- MUST include: WHERE lab_id = ${labId}
-- Return ONLY SQL
-- NO markdown, NO backticks, NO explanations, NO 'sql:' prefix
-`;
-
-      sql = await askGroq(fallbackPrompt);
-      sql = cleanSQL(sql);
-
-      console.log("🟣 Fallback SQL (clean):", sql);
-
-      // Execute fallback SQL
-      result = await sequelize.query(sql, {
-        type: sequelize.QueryTypes.SELECT,
-      });
+    // human readable short answer (basic)
+    let answerText = '';
+    if (/^select\s+count/i.test(built.sql) || /count\(/i.test(built.sql)) {
+      const cnt = result[0] ? Object.values(result[0])[0] : 0;
+      answerText = `Count: ${cnt}`;
+    } else if (/avg/i.test(built.sql)) {
+      const val = result[0] ? result[0].value ?? Object.values(result[0])[0] : null;
+      answerText = val === null || val === undefined ? 'No data' : `Average: ${val}`;
+    } else {
+      answerText = `Returned ${result.length} rows.`;
     }
 
-    // ---------------------------------------------
-    // 5️⃣ EXPLANATION USING GROQ
-    // ---------------------------------------------
-    const explainPrompt = `
-Explain this SQL result in simple English.
-User question: ${prompt}
-SQL: ${sql}
-Data: ${JSON.stringify(result)}
-Keep it short.
-`;
-
-    const explanation = await askGroq(explainPrompt);
-
-    // ---------------------------------------------
-    // 6️⃣ SEND RESPONSE
-    // ---------------------------------------------
-    res.json({
-      sql,
-      answerText: result.length === 0 ? "No matching data." : explanation.trim(),
-      answerTable: result.length > 0 ? result : null,
+    return res.json({
+      sql: built.sql,
+      replacements: built.replacements,
+      answerText,
+      answerTable: result
     });
 
   } catch (error) {
-    console.log("🔥 runQuery error:", error);
-    res.status(500).json({
-      error: "Server error",
-      details: error.message,
-    });
+    console.error('runQuery parser error:', error);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 };
+
+
 
 // ---------------------------------------------
 // Helper → Strong SQL Cleanup
 // ---------------------------------------------
-function cleanSQL(sql) {
-  return sql
-    .replace(/```sql/gi, "")
-    .replace(/```/g, "")
-    .replace(/^sql[\s:]/i, "")
-    .replace(/^SQL[\s:]/i, "")
-    .replace(/--.*/g, "")
-    .replace(/\bFoodReports\b/g, `"FoodReports"`)
-    .trim();
-}
+// function cleanSQL(sql) {
+//   return sql
+//     .replace(/```sql/gi, "")
+//     .replace(/```/g, "")
+//     .replace(/^sql[\s:]/i, "")
+//     .replace(/^SQL[\s:]/i, "")
+//     .replace(/--.*/g, "")
+//     .replace(/\bFoodReports\b/g, `"FoodReports"`)
+//     .trim();
+// }
 
 
 // ---------------------------------------------
